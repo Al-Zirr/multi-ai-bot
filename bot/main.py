@@ -27,6 +27,7 @@ from bot.services.voice_service import VoiceService
 from bot.services.youtube_service import YouTubeService
 from bot.services.bookmark_service import BookmarkService
 from bot.services.export_service import ExportService
+from bot.services.quota_service import QuotaService
 
 LOG_FORMAT = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 LOG_DIR = os.getenv("LOG_DIR", "/app/logs")
@@ -118,14 +119,18 @@ async def main():
     dp["youtube_service"] = YouTubeService(
         proxy=proxy_url,
         files_dir=config.files_dir,
+        use_local_api=config.use_local_api,
     )
 
     dp["bookmark_service"] = BookmarkService()
     dp["export_service"] = ExportService()
 
+    quota_service = QuotaService()
+    dp["quota_service"] = quota_service
+
     # Middlewares
-    dp.message.middleware(AuthMiddleware(config.admin_ids))
-    dp.callback_query.middleware(AuthMiddleware(config.admin_ids))
+    dp.message.middleware(AuthMiddleware(config.admin_ids, quota_service=quota_service))
+    dp.callback_query.middleware(AuthMiddleware(config.admin_ids, quota_service=quota_service))
 
     # Routers (order matters: specific first, catch-all last)
     dp.include_router(start.router)
@@ -179,6 +184,7 @@ async def main():
         BotCommand(command="export", description="Экспорт диалога"),
         BotCommand(command="context", description="Статус контекста"),
         BotCommand(command="clear", description="Очистить историю"),
+        BotCommand(command="plan", description="Мой план и лимиты"),
         BotCommand(command="help", description="Справка"),
     ])
 

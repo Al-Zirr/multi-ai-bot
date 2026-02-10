@@ -2,10 +2,12 @@ from aiogram import Router, F
 from aiogram.filters import CommandStart, Command
 from aiogram.types import Message
 
+from bot.config import config as app_config
 from bot.keyboards.main_menu import get_main_menu
 from bot.services.ai_router import AIRouter
 from bot.services.balance_service import BalanceService
 from bot.services.context_service import ContextService
+from bot.services.quota_service import QuotaService
 from bot.services.voice_service import VoiceService
 
 router = Router()
@@ -69,6 +71,7 @@ async def cmd_help(message: Message):
         "/fix \u2014 Коррекция ударений\n"
         "/context \u2014 Статус контекста\n"
         "/clear \u2014 Очистить историю диалога\n"
+        "/plan \u2014 Мой план и лимиты\n"
         "/bookmarks \u2014 Мои закладки\n"
         "/export \u2014 Экспорт диалога (MD/JSON/PDF)\n"
         "/help \u2014 Эта справка\n\n"
@@ -273,3 +276,74 @@ async def cmd_setbalance(message: Message, balance_service: BalanceService):
         return
     await balance_service.set_balance(service_name, new_val)
     await message.answer(f"Баланс <b>{service_name}</b> установлен: {new_val}", parse_mode="HTML")
+
+
+@router.message(Command("plan"))
+async def cmd_plan(message: Message, quota_service: QuotaService):
+    """Show current plan and usage."""
+    user_id = message.from_user.id
+    info = await quota_service.get_usage_info(user_id)
+
+    plan_labels = {"free": "Free", "basic": "Basic", "pro": "Pro"}
+    plan_label = plan_labels.get(info["plan"], info["plan"])
+
+    # Tokens
+    if info["tokens_limit"] == 0:
+        tokens_str = f"{info['tokens_used']:,} / безлимит"
+    else:
+        tokens_str = f"{info['tokens_used']:,} / {info['tokens_limit']:,}"
+
+    # Images
+    if info["images_limit"] == 0:
+        images_str = f"{info['images_used']} / безлимит"
+    else:
+        images_str = f"{info['images_used']} / {info['images_limit']}"
+
+    # YouTube
+    yt_str = "доступно" if info["youtube_allowed"] else "недоступно"
+
+    text = (
+        f"<b>Ваш план: {plan_label}</b>\n\n"
+        f"Токены сегодня: {tokens_str}\n"
+        f"Изображения сегодня: {images_str}\n"
+        f"YouTube скачивание: {yt_str}\n\n"
+        f"Счётчики обнуляются ежедневно."
+    )
+    await message.answer(text, parse_mode="HTML")
+
+
+@router.message(Command("setplan"))
+async def cmd_setplan(message: Message, quota_service: QuotaService):
+    """Admin: set user plan. Usage: /setplan <telegram_id> <plan>"""
+    user_id = message.from_user.id
+    if user_id not in app_config.admin_ids:
+        await message.answer("Команда доступна только администраторам.")
+        return
+
+    parts = message.text.split()
+    if len(parts) != 3:
+        await message.answer(
+            "<b>Использование:</b>\n"
+            "<code>/setplan telegram_id plan</code>\n\n"
+            "Планы: <code>free</code>, <code>basic</code>, <code>pro</code>",
+            parse_mode="HTML",
+        )
+        return
+
+    try:
+        target_id = int(parts[1])
+    except ValueError:
+        await message.answer("Неверный telegram_id")
+        return
+
+    plan = parts[2].lower()
+    ok = await quota_service.set_plan(target_id, plan)
+    if ok:
+        await message.answer(
+            f"План пользователя <code>{target_id}</code> установлен: <b>{plan}</b>",
+            parse_mode="HTML",
+        )
+    else:
+        await message.answer(
+            f"Ошибка. Проверьте telegram_id и план (free/basic/pro).",
+        )

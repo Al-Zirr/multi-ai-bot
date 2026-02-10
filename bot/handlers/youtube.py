@@ -5,7 +5,7 @@ import os
 
 from aiogram import Router, F
 from aiogram.filters import Filter
-from aiogram.types import Message, CallbackQuery, BufferedInputFile
+from aiogram.types import Message, CallbackQuery, BufferedInputFile, FSInputFile
 
 from bot.keyboards.youtube import (
     get_youtube_menu,
@@ -18,9 +18,11 @@ from bot.services.balance_service import BalanceService
 from bot.services.settings_service import SettingsService
 from bot.services.youtube_service import (
     YouTubeService,
-    MAX_FILE_SIZE,
+    MAX_FILE_SIZE_CLOUD,
+    LARGE_FILE_WARNING,
     format_duration,
 )
+from bot.services.quota_service import QuotaService
 from bot.utils.formatting import md_to_html
 from bot.utils.prompts import SYSTEM_PROMPT
 
@@ -117,6 +119,7 @@ async def handle_ask_about_video(
     ai_router: AIRouter,
     balance_service: BalanceService,
     settings_service: SettingsService,
+    quota_service: QuotaService,
 ):
     user_id = message.from_user.id
     state = _yt_state.get(user_id)
@@ -129,6 +132,12 @@ async def handle_ask_about_video(
     if YouTubeService.extract_video_id(message.text):
         state["ask_mode"] = False
         return  # Will be caught by handle_youtube_url below
+
+    # Check token quota
+    allowed, error_msg = await quota_service.check_tokens(user_id)
+    if not allowed:
+        await message.answer(error_msg, parse_mode="HTML")
+        return
 
     question = message.text.strip()
     transcript = state["transcript_text"]
@@ -165,6 +174,9 @@ async def handle_ask_about_video(
                 service.last_usage["input_tokens"],
                 service.last_usage["output_tokens"],
             )
+        if quota_service and service.last_usage:
+            total = service.last_usage["input_tokens"] + service.last_usage["output_tokens"]
+            await quota_service.track_token_usage(user_id, total)
     except Exception as e:
         logger.exception("YouTube ask failed")
         await waiting.edit_text(f"Ошибка: {str(e)[:300]}")
@@ -225,10 +237,17 @@ async def on_summarize(
     ai_router: AIRouter,
     balance_service: BalanceService,
     settings_service: SettingsService,
+    quota_service: QuotaService,
 ):
     video_id = callback.data.split(":")[2]
     user_id = callback.from_user.id
     state = _yt_state.get(user_id, {})
+
+    # Check token quota
+    allowed, error_msg = await quota_service.check_tokens(user_id)
+    if not allowed:
+        await callback.answer("Лимит токенов исчерпан", show_alert=True)
+        return
 
     await callback.answer("Загружаю субтитры...")
 
@@ -262,11 +281,11 @@ async def on_summarize(
     try:
         if duration > 7200:  # >2 hours — chunked summarization
             summary = await _summarize_long(
-                transcript, title, service, provider, balance_service
+                transcript, title, service, provider, balance_service, quota_service, user_id
             )
         else:
             summary = await _summarize_short(
-                transcript, title, service, provider, balance_service
+                transcript, title, service, provider, balance_service, quota_service, user_id
             )
 
         html = md_to_html(summary)
@@ -288,7 +307,7 @@ async def on_summarize(
         await waiting.edit_text(f"Ошибка суммаризации: {str(e)[:300]}")
 
 
-async def _summarize_short(transcript, title, service, provider, balance_service):
+async def _summarize_short(transcript, title, service, provider, balance_service, quota_service=None, user_id=None):
     """Summarize video ≤2h in one pass."""
     text = transcript.text
     if len(text) > MAX_TRANSCRIPT_CHARS:
@@ -302,10 +321,13 @@ async def _summarize_short(transcript, title, service, provider, balance_service
         await balance_service.track_ai_usage(
             provider, service.last_usage["input_tokens"], service.last_usage["output_tokens"]
         )
+    if quota_service and user_id and service.last_usage:
+        total = service.last_usage["input_tokens"] + service.last_usage["output_tokens"]
+        await quota_service.track_token_usage(user_id, total)
     return result
 
 
-async def _summarize_long(transcript, title, service, provider, balance_service):
+async def _summarize_long(transcript, title, service, provider, balance_service, quota_service=None, user_id=None):
     """Summarize video >2h by chunking."""
     segments = transcript.segments
     chunks = []
@@ -339,6 +361,9 @@ async def _summarize_long(transcript, title, service, provider, balance_service)
             await balance_service.track_ai_usage(
                 provider, service.last_usage["input_tokens"], service.last_usage["output_tokens"]
             )
+        if quota_service and user_id and service.last_usage:
+            total = service.last_usage["input_tokens"] + service.last_usage["output_tokens"]
+            await quota_service.track_token_usage(user_id, total)
 
     # Merge summaries
     merged_input = "\n\n---\n\n".join(
@@ -352,6 +377,9 @@ async def _summarize_long(transcript, title, service, provider, balance_service)
         await balance_service.track_ai_usage(
             provider, service.last_usage["input_tokens"], service.last_usage["output_tokens"]
         )
+    if quota_service and user_id and service.last_usage:
+        total = service.last_usage["input_tokens"] + service.last_usage["output_tokens"]
+        await quota_service.track_token_usage(user_id, total)
     return result
 
 
@@ -407,11 +435,19 @@ async def on_video_menu(callback: CallbackQuery):
 async def on_download_video(
     callback: CallbackQuery,
     youtube_service: YouTubeService,
+    quota_service: QuotaService,
 ):
+    user_id = callback.from_user.id
+
+    # Check YouTube download access
+    allowed, error_msg = await quota_service.check_youtube(user_id)
+    if not allowed:
+        await callback.answer("Скачивание YouTube недоступно в вашем плане", show_alert=True)
+        return
+
     parts = callback.data.split(":")
     video_id = parts[2]
     quality = parts[3]
-    user_id = callback.from_user.id
     state = _yt_state.get(user_id, {})
     title = state.get("title", "video")
 
@@ -426,24 +462,33 @@ async def on_download_video(
             video_id, quality, progress_callback=progress,
         )
 
-        if filesize > MAX_FILE_SIZE:
+        if filesize > youtube_service.max_file_size:
             size_mb = filesize / (1024 * 1024)
+            limit_mb = youtube_service.max_file_size / (1024 * 1024)
             await waiting.edit_text(
-                f"Файл слишком большой: {size_mb:.0f}MB (лимит 50MB).\n"
+                f"Файл слишком большой: {size_mb:.0f}MB (лимит {limit_mb:.0f}MB).\n"
                 "Попробуйте ниже качество.",
                 reply_markup=get_video_quality_keyboard(video_id),
             )
             return
 
-        await waiting.edit_text("Отправляю...")
+        size_mb = filesize / (1024 * 1024)
 
-        with open(filepath, "rb") as f:
-            video_data = f.read()
+        if filesize > LARGE_FILE_WARNING:
+            await waiting.edit_text(f"Отправляю большой файл ({size_mb:.0f}MB), подождите...")
+        else:
+            await waiting.edit_text("Отправляю...")
 
         safe_title = "".join(c for c in title if c.isalnum() or c in " -_")[:50]
-        video_file = BufferedInputFile(video_data, filename=f"{safe_title}.mp4")
 
-        size_mb = filesize / (1024 * 1024)
+        if filesize > MAX_FILE_SIZE_CLOUD and youtube_service.use_local_api:
+            # Large file with Local API — use FSInputFile (no RAM overhead)
+            video_file = FSInputFile(filepath, filename=f"{safe_title}.mp4")
+        else:
+            with open(filepath, "rb") as f:
+                video_data = f.read()
+            video_file = BufferedInputFile(video_data, filename=f"{safe_title}.mp4")
+
         await callback.message.answer_video(
             video=video_file,
             caption=f"{title} | {quality} | {size_mb:.1f}MB",
@@ -473,11 +518,19 @@ async def on_audio_menu(callback: CallbackQuery):
 async def on_download_audio(
     callback: CallbackQuery,
     youtube_service: YouTubeService,
+    quota_service: QuotaService,
 ):
+    user_id = callback.from_user.id
+
+    # Check YouTube download access
+    allowed, error_msg = await quota_service.check_youtube(user_id)
+    if not allowed:
+        await callback.answer("Скачивание YouTube недоступно в вашем плане", show_alert=True)
+        return
+
     parts = callback.data.split(":")
     video_id = parts[2]
     fmt = parts[3]
-    user_id = callback.from_user.id
     state = _yt_state.get(user_id, {})
     title = state.get("title", "audio")
     channel = state.get("channel", "")
@@ -496,25 +549,33 @@ async def on_download_audio(
             video_id, fmt, progress_callback=progress,
         )
 
-        if filesize > MAX_FILE_SIZE:
+        if filesize > youtube_service.max_file_size:
             size_mb = filesize / (1024 * 1024)
+            limit_mb = youtube_service.max_file_size / (1024 * 1024)
             await waiting.edit_text(
-                f"Файл слишком большой: {size_mb:.0f}MB (лимит 50MB).\n"
+                f"Файл слишком большой: {size_mb:.0f}MB (лимит {limit_mb:.0f}MB).\n"
                 "Попробуйте формат с меньшим битрейтом.",
                 reply_markup=get_audio_format_keyboard(video_id),
             )
             return
 
-        await waiting.edit_text("Отправляю...")
+        size_mb = filesize / (1024 * 1024)
 
-        with open(filepath, "rb") as f:
-            audio_data = f.read()
+        if filesize > LARGE_FILE_WARNING:
+            await waiting.edit_text(f"Отправляю большой файл ({size_mb:.0f}MB), подождите...")
+        else:
+            await waiting.edit_text("Отправляю...")
 
         ext = "mp3" if fmt.startswith("mp3") else "wav"
         safe_title = "".join(c for c in title if c.isalnum() or c in " -_")[:50]
-        audio_file = BufferedInputFile(audio_data, filename=f"{safe_title}.{ext}")
 
-        size_mb = filesize / (1024 * 1024)
+        if filesize > MAX_FILE_SIZE_CLOUD and youtube_service.use_local_api:
+            audio_file = FSInputFile(filepath, filename=f"{safe_title}.{ext}")
+        else:
+            with open(filepath, "rb") as f:
+                audio_data = f.read()
+            audio_file = BufferedInputFile(audio_data, filename=f"{safe_title}.{ext}")
+
         await callback.message.answer_audio(
             audio=audio_file,
             title=title,

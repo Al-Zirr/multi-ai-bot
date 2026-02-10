@@ -19,6 +19,7 @@ from bot.services.memory_service import MemoryService
 from bot.services.settings_service import SettingsService
 from bot.services.telegraph_service import TelegraphService
 from bot.services.voice_service import VoiceService
+from bot.services.quota_service import QuotaService
 from bot.utils.formatting import md_to_html
 from bot.utils.prompts import SYSTEM_PROMPT, STYLE_PREFIXES
 
@@ -43,19 +44,26 @@ async def handle_text(
     balance_service: BalanceService,
     memory_service: MemoryService,
     settings_service: SettingsService,
+    quota_service: QuotaService,
 ):
     user_id = message.from_user.id
     text = message.text.strip()
+
+    # Check token quota
+    allowed, error_msg = await quota_service.check_tokens(user_id)
+    if not allowed:
+        await message.answer(error_msg, parse_mode="HTML")
+        return
 
     _last_user_message[user_id] = text
     provider = await ai_router.load_user_provider(user_id)
 
     if provider == "all":
-        await _ask_all(message, text, ai_router, config, search_service, telegraph_service, balance_service, settings_service)
+        await _ask_all(message, text, ai_router, config, search_service, telegraph_service, balance_service, settings_service, quota_service)
         await ai_router.save_user_provider(user_id, ai_router.default_provider)
         return
 
-    await _ask_single(message, text, provider, ai_router, config, context_service, rag_service, file_service, search_service, telegraph_service, voice_service, balance_service, memory_service, settings_service)
+    await _ask_single(message, text, provider, ai_router, config, context_service, rag_service, file_service, search_service, telegraph_service, voice_service, balance_service, memory_service, settings_service, quota_service)
 
 
 async def _ask_single(
@@ -73,6 +81,7 @@ async def _ask_single(
     balance_service: BalanceService | None = None,
     memory_service: MemoryService | None = None,
     settings_service: SettingsService | None = None,
+    quota_service: QuotaService | None = None,
 ):
     user_id = message.from_user.id
     service = ai_router.get_service(provider)
@@ -186,6 +195,11 @@ async def _ask_single(
                 service.last_usage["output_tokens"],
             )
 
+        # Track quota
+        if quota_service and service.last_usage:
+            total_tokens = service.last_usage["input_tokens"] + service.last_usage["output_tokens"]
+            await quota_service.track_token_usage(user_id, total_tokens)
+
         if tts_mode == "ai" and voice_service:
             user_voice = user_settings.tts_voice if user_settings else ""
             await _send_tts(message, full_text, voice_service, balance_service, provider, user_voice=user_voice)
@@ -220,6 +234,7 @@ async def _ask_all(
     telegraph_service: TelegraphService | None = None,
     balance_service: BalanceService | None = None,
     settings_service: SettingsService | None = None,
+    quota_service: QuotaService | None = None,
 ):
     """Send question to all available models in parallel."""
     user_id = message.from_user.id
@@ -264,6 +279,10 @@ async def _ask_all(
                 await balance_service.track_ai_usage(
                     prov, svc.last_usage["input_tokens"], svc.last_usage["output_tokens"]
                 )
+            # Track quota
+            if quota_service and svc.last_usage:
+                total_tokens = svc.last_usage["input_tokens"] + svc.last_usage["output_tokens"]
+                await quota_service.track_token_usage(user_id, total_tokens)
             return prov, display, result, elapsed
         except Exception as e:
             elapsed = time.monotonic() - start
@@ -336,6 +355,7 @@ async def on_regenerate(
     voice_service: VoiceService,
     balance_service: BalanceService,
     settings_service: SettingsService,
+    quota_service: QuotaService,
 ):
     user_id = callback.from_user.id
     text = _last_user_message.get(user_id)
@@ -347,15 +367,21 @@ async def on_regenerate(
         )
         return
 
+    # Check token quota
+    allowed, error_msg = await quota_service.check_tokens(user_id)
+    if not allowed:
+        await callback.answer("Лимит токенов исчерпан", show_alert=True)
+        return
+
     await callback.answer("Перегенерирую...")
     provider = await ai_router.load_user_provider(user_id)
 
-    await _ask_single(callback.message, text, provider, ai_router, config, context_service, rag_service, file_service, search_service, telegraph_service, voice_service, balance_service, settings_service=settings_service)
+    await _ask_single(callback.message, text, provider, ai_router, config, context_service, rag_service, file_service, search_service, telegraph_service, voice_service, balance_service, settings_service=settings_service, quota_service=quota_service)
 
 
 @router.callback_query(F.data.startswith("ask:"))
 async def on_ask_other_model(
-    callback: CallbackQuery, ai_router: AIRouter, config: Config, telegraph_service: TelegraphService, voice_service: VoiceService, balance_service: BalanceService
+    callback: CallbackQuery, ai_router: AIRouter, config: Config, telegraph_service: TelegraphService, voice_service: VoiceService, balance_service: BalanceService, quota_service: QuotaService,
 ):
     user_id = callback.from_user.id
     provider = callback.data.split(":")[1]
@@ -366,6 +392,12 @@ async def on_ask_other_model(
             "Нет сообщения",
             show_alert=True,
         )
+        return
+
+    # Check token quota
+    allowed, error_msg = await quota_service.check_tokens(user_id)
+    if not allowed:
+        await callback.answer("Лимит токенов исчерпан", show_alert=True)
         return
 
     # Switch active model to the one user clicked
@@ -399,3 +431,8 @@ async def on_ask_other_model(
         await balance_service.track_ai_usage(
             provider, service.last_usage["input_tokens"], service.last_usage["output_tokens"]
         )
+
+    # Track quota
+    if full_text and quota_service and service.last_usage:
+        total_tokens = service.last_usage["input_tokens"] + service.last_usage["output_tokens"]
+        await quota_service.track_token_usage(user_id, total_tokens)

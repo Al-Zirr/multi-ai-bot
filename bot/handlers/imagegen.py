@@ -9,6 +9,7 @@ from aiogram.types import Message, CallbackQuery, BufferedInputFile
 from bot.keyboards.imagegen import get_image_result_keyboard, PROVIDER_LABELS
 from bot.services.balance_service import BalanceService
 from bot.services.image_service import ImageService, ImageGenParams
+from bot.services.quota_service import QuotaService
 from bot.services.settings_service import SettingsService
 
 logger = logging.getLogger(__name__)
@@ -28,6 +29,7 @@ async def cmd_imagine(
     image_service: ImageService,
     balance_service: BalanceService,
     settings_service: SettingsService,
+    quota_service: QuotaService,
 ):
     prompt = message.text.removeprefix("/imagine").strip()
     if not prompt:
@@ -42,6 +44,13 @@ async def cmd_imagine(
         return
 
     user_id = message.from_user.id
+
+    # Check image quota
+    allowed, error_msg = await quota_service.check_images(user_id)
+    if not allowed:
+        await message.answer(error_msg, parse_mode="HTML")
+        return
+
     prev = _user_image_params.get(user_id)
 
     # Default provider from user settings if no previous params
@@ -60,7 +69,7 @@ async def cmd_imagine(
     )
     _user_image_params[user_id] = params
 
-    await _generate_and_send(message, params, image_service, balance_service)
+    await _generate_and_send(message, params, image_service, balance_service, quota_service, user_id)
 
 
 # ═══════════════════════════════════════════════════════
@@ -93,14 +102,21 @@ async def on_regen(
     callback: CallbackQuery,
     image_service: ImageService,
     balance_service: BalanceService,
+    quota_service: QuotaService,
 ):
     user_id = callback.from_user.id
     params = _user_image_params.get(user_id)
     if not params:
         await callback.answer("Нет промпта для повторной генерации", show_alert=True)
         return
+
+    allowed, _ = await quota_service.check_images(user_id)
+    if not allowed:
+        await callback.answer("Лимит изображений исчерпан", show_alert=True)
+        return
+
     await callback.answer("Генерирую заново...")
-    await _generate_and_send(callback.message, params, image_service, balance_service)
+    await _generate_and_send(callback.message, params, image_service, balance_service, quota_service, user_id)
 
 
 @router.callback_query(F.data.startswith("img:size:"))
@@ -108,15 +124,20 @@ async def on_change_size(
     callback: CallbackQuery,
     image_service: ImageService,
     balance_service: BalanceService,
+    quota_service: QuotaService,
 ):
     user_id = callback.from_user.id
     params = _user_image_params.get(user_id)
     if not params:
         await callback.answer("Сначала сгенерируйте изображение", show_alert=True)
         return
+    allowed, _ = await quota_service.check_images(user_id)
+    if not allowed:
+        await callback.answer("Лимит изображений исчерпан", show_alert=True)
+        return
     params.size = callback.data.split(":")[2]
     await callback.answer(f"Размер: {params.size}")
-    await _generate_and_send(callback.message, params, image_service, balance_service)
+    await _generate_and_send(callback.message, params, image_service, balance_service, quota_service, user_id)
 
 
 @router.callback_query(F.data.startswith("img:style:"))
@@ -124,15 +145,20 @@ async def on_change_style(
     callback: CallbackQuery,
     image_service: ImageService,
     balance_service: BalanceService,
+    quota_service: QuotaService,
 ):
     user_id = callback.from_user.id
     params = _user_image_params.get(user_id)
     if not params:
         await callback.answer("Сначала сгенерируйте изображение", show_alert=True)
         return
+    allowed, _ = await quota_service.check_images(user_id)
+    if not allowed:
+        await callback.answer("Лимит изображений исчерпан", show_alert=True)
+        return
     params.style = callback.data.split(":")[2]
     await callback.answer(f"Стиль: {params.style}")
-    await _generate_and_send(callback.message, params, image_service, balance_service)
+    await _generate_and_send(callback.message, params, image_service, balance_service, quota_service, user_id)
 
 
 @router.callback_query(F.data.startswith("img:quality:"))
@@ -140,15 +166,20 @@ async def on_change_quality(
     callback: CallbackQuery,
     image_service: ImageService,
     balance_service: BalanceService,
+    quota_service: QuotaService,
 ):
     user_id = callback.from_user.id
     params = _user_image_params.get(user_id)
     if not params:
         await callback.answer("Сначала сгенерируйте изображение", show_alert=True)
         return
+    allowed, _ = await quota_service.check_images(user_id)
+    if not allowed:
+        await callback.answer("Лимит изображений исчерпан", show_alert=True)
+        return
     params.quality = callback.data.split(":")[2]
     await callback.answer(f"{'HD' if params.quality == 'hd' else 'Standard'}")
-    await _generate_and_send(callback.message, params, image_service, balance_service)
+    await _generate_and_send(callback.message, params, image_service, balance_service, quota_service, user_id)
 
 
 @router.callback_query(F.data.startswith("img:provider:"))
@@ -156,16 +187,21 @@ async def on_change_provider(
     callback: CallbackQuery,
     image_service: ImageService,
     balance_service: BalanceService,
+    quota_service: QuotaService,
 ):
     user_id = callback.from_user.id
     params = _user_image_params.get(user_id)
     if not params:
         await callback.answer("Сначала сгенерируйте изображение", show_alert=True)
         return
+    allowed, _ = await quota_service.check_images(user_id)
+    if not allowed:
+        await callback.answer("Лимит изображений исчерпан", show_alert=True)
+        return
     params.provider = callback.data.split(":")[2]
     label = PROVIDER_LABELS.get(params.provider, params.provider)
     await callback.answer(label)
-    await _generate_and_send(callback.message, params, image_service, balance_service)
+    await _generate_and_send(callback.message, params, image_service, balance_service, quota_service, user_id)
 
 
 # ═══════════════════════════════════════════════════════
@@ -177,6 +213,8 @@ async def _generate_and_send(
     params: ImageGenParams,
     image_service: ImageService,
     balance_service: BalanceService,
+    quota_service: QuotaService | None = None,
+    user_id: int | None = None,
 ):
     provider_label = PROVIDER_LABELS.get(params.provider, params.provider)
     waiting = await message.answer(f"{provider_label} генерирует изображение...")
@@ -197,6 +235,10 @@ async def _generate_and_send(
         service_map = {"dalle": "openai", "imagen": "gemini", "flux": "bfl"}
         service_name = service_map.get(params.provider, params.provider)
         await balance_service.track_image_generation(service_name, result.cost)
+
+    # Track image quota
+    if quota_service and user_id:
+        await quota_service.track_image_usage(user_id)
 
     # Delete waiting message
     await waiting.delete()

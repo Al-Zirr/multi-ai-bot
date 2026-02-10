@@ -15,7 +15,9 @@ YOUTUBE_RE = re.compile(
     r"([a-zA-Z0-9_-]{11})"
 )
 
-MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB Telegram limit
+MAX_FILE_SIZE_CLOUD = 50 * 1024 * 1024       # 50MB Cloud API limit
+MAX_FILE_SIZE_LOCAL = 2 * 1024 * 1024 * 1024  # 2GB Local API limit
+LARGE_FILE_WARNING = 200 * 1024 * 1024        # 200MB — warn user about long upload
 
 # Preferred subtitle languages in order
 SUBTITLE_LANGS = ["ru", "ar", "en"]
@@ -56,9 +58,12 @@ COOKIES_PATH = "/app/files/youtube_cookies.txt"
 
 
 class YouTubeService:
-    def __init__(self, proxy: str | None = None, files_dir: str = "/app/files"):
+    def __init__(self, proxy: str | None = None, files_dir: str = "/app/files",
+                 use_local_api: bool = False):
         self.proxy = proxy
         self.files_dir = files_dir
+        self.use_local_api = use_local_api
+        self.max_file_size = MAX_FILE_SIZE_LOCAL if use_local_api else MAX_FILE_SIZE_CLOUD
         self._tmp_dir = os.path.join(files_dir, "yt_tmp")
         os.makedirs(self._tmp_dir, exist_ok=True)
 

@@ -18,6 +18,7 @@ from bot.services.balance_service import BalanceService
 from bot.services.settings_service import SettingsService
 from bot.services.streaming_service import StreamingService
 from bot.services.telegraph_service import TelegraphService
+from bot.services.quota_service import QuotaService
 from bot.services.voice_service import VoiceService
 from bot.utils.prompts import SYSTEM_PROMPT
 
@@ -63,8 +64,15 @@ async def handle_voice(
     voice_service: VoiceService,
     balance_service: BalanceService,
     settings_service: SettingsService,
+    quota_service: QuotaService,
 ):
     user_id = message.from_user.id
+
+    # Check token quota
+    allowed, error_msg = await quota_service.check_tokens(user_id)
+    if not allowed:
+        await message.answer(error_msg, parse_mode="HTML")
+        return
 
     # Download voice file
     voice = message.voice
@@ -168,6 +176,11 @@ async def handle_voice(
             await balance_service.track_ai_usage(
                 provider, service.last_usage["input_tokens"], service.last_usage["output_tokens"]
             )
+
+        # Track quota
+        if quota_service and service.last_usage:
+            total_tokens = service.last_usage["input_tokens"] + service.last_usage["output_tokens"]
+            await quota_service.track_token_usage(user_id, total_tokens)
 
         # TTS if "ai" mode triggered
         if tts_mode == "ai":

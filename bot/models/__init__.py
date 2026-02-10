@@ -6,9 +6,10 @@ from bot.models.user_settings import UserSettings
 from bot.models.pronunciation_rule import PronunciationRule
 from bot.models.stress_override import StressOverride, StressUnknown
 from bot.models.bookmark import Bookmark
+from bot.models.user import User
 
 __all__ = [
     "Conversation", "ContextSummary", "ProjectFile", "DocumentEmbedding",
     "UserSettings", "PronunciationRule", "StressOverride", "StressUnknown",
-    "Bookmark",
+    "Bookmark", "User",
 ]

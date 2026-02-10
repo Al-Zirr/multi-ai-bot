@@ -9,8 +9,9 @@ logger = logging.getLogger(__name__)
 
 
 class AuthMiddleware(BaseMiddleware):
-    def __init__(self, admin_ids: list[int]):
+    def __init__(self, admin_ids: list[int], quota_service=None):
         self.admin_ids = admin_ids
+        self.quota_service = quota_service
 
     async def __call__(
         self,
@@ -19,10 +20,13 @@ class AuthMiddleware(BaseMiddleware):
         data: dict[str, Any],
     ) -> Any:
         user_id = None
+        username = None
         if isinstance(event, Message):
             user_id = event.from_user.id if event.from_user else None
+            username = event.from_user.username if event.from_user else None
         elif isinstance(event, CallbackQuery):
             user_id = event.from_user.id if event.from_user else None
+            username = event.from_user.username if event.from_user else None
 
         if user_id is None:
             return
@@ -34,5 +38,9 @@ class AuthMiddleware(BaseMiddleware):
             elif isinstance(event, CallbackQuery):
                 await event.answer("Доступ запрещён", show_alert=True)
             return
+
+        # Auto-register user in quota system
+        if self.quota_service:
+            await self.quota_service.get_or_create_user(user_id, username)
 
         return await handler(event, data)
