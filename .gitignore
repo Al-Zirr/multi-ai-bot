@@ -1,0 +1,42 @@
+# Environment
+.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# Logs
+logs/
+*.log
+
+# Backups
+backups/
+
+# Node
+node_modules/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Data files (uploaded by users)
+files/
+
+# yt-dlp cache
+yt-dlp-cache/
+
+# Test scripts (local debugging)
+test_*.py
+sandbox/

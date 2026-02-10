@@ -1,0 +1,58 @@
+services:
+  bot:
+    build: .
+    container_name: multi_ai_bot
+    restart: always
+    network_mode: host
+    env_file: .env
+    environment:
+      HTTP_PROXY: http://127.0.0.1:10809
+      HTTPS_PROXY: http://127.0.0.1:10809
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - /media/hdd/ai-bot/files:/app/files
+      - /media/hdd/ai-bot/logs:/app/logs
+      - /media/hdd/ai-bot/yt-dlp-cache:/root/.cache/yt-dlp
+
+  db:
+    image: pgvector/pgvector:pg16
+    container_name: multi_ai_bot_db
+    restart: always
+    environment:
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_DB: ${DB_NAME}
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - bot-network
+
+  telegram-bot-api:
+    image: aiogram/telegram-bot-api:latest
+    container_name: telegram_bot_api
+    restart: always
+    environment:
+      TELEGRAM_API_ID: ${TELEGRAM_API_ID}
+      TELEGRAM_API_HASH: ${TELEGRAM_API_HASH}
+    ports:
+      - "127.0.0.1:8081:8081"
+    volumes:
+      - /media/hdd/ai-bot/telegram-api:/var/lib/telegram-bot-api
+    networks:
+      - bot-network
+
+volumes:
+  postgres_data:
+
+networks:
+  bot-network:
+    driver: bridge
